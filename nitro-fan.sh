@@ -131,6 +131,31 @@ WantedBy=multi-user.target
 EOF
 }
 
+print_unit_timer() {
+    cat <<EOF
+nitro-cpu-quiet-assert.service:
+[Unit]
+Description=Re-assert Nitro CPU quiet limits (only when nitro-cpu-quiet enabled)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/nitro-fan cpu-quiet-assert
+
+nitro-cpu-quiet-assert.timer:
+[Unit]
+Description=Periodic re-assert of Nitro CPU quiet limits
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+Unit=nitro-cpu-quiet-assert.service
+
+[Install]
+WantedBy=timers.target
+
+EOF
+}
+
 cmd_cpu_quiet() {
     local mode="${1:-}" max_mhz="${2:-2600000}"
     case "$mode" in
@@ -160,6 +185,15 @@ cmd_cpu_quiet() {
             done
             echo "on" > "$CACHE_DIR/cpu-quiet.active"
             log "CPU-quiet применён: EPP=balance_power, потолок ${max_mhz}"
+            ;;
+        assert)
+            need_root "cpu-quiet-assert"
+            systemctl is-enabled nitro-cpu-quiet.service >/dev/null 2>&1 || exit 0
+            for pol in /sys/devices/system/cpu/cpufreq/policy*; do
+                echo "balance_power" > "$pol/energy_performance_preference" 2>/dev/null || true
+                echo "$max_mhz"      > "$pol/scaling_max_freq" 2>/dev/null || true
+            done
+            log "CPU-quiet re-assert: EPP=balance_power, потолок ${max_mhz}"
             ;;
         off)
             need_root "cpu-quiet off"
@@ -265,47 +299,41 @@ cmd_fan_curve() {
 }
 
 print_nbfc_install_steps() {
+    local repo_config="/home/ruslan/nitro-fan/nbfc-quiet-curve.json"
+    [ -f "$repo_config" ] || repo_config="$PWD/nbfc-quiet-curve.json"
     cat <<EOF
-Установка NBFC-Linux на Linux Mint (выполняется от администратора):
+Установка NBFC-Linux на Linux Mint 22 (актуально для этой машины, проверено):
 
     cd ~/Downloads
     curl -LO https://github.com/nbfc-linux/nbfc-linux/releases/download/0.5.4/linux-mint-22-nbfc-linux_0.5.4_amd64.deb
     sudo apt install ./linux-mint-22-nbfc-linux_0.5.4_amd64.deb
     sudo modprobe ec_sys write_support=1
 
-Проверка совместимости источников тревоги и конфигов (только чтение):
+Постоянная загрузка ec_sys с write-режимом (переживает перезагрузку):
 
-    ec_probe dump
-    sudo nbfc update
-    sudo nbfc rate-config -a
+    echo 'options ec_sys write_support=1' | sudo tee /etc/modprobe.d/ec_sys.conf
+    echo 'ec_sys' | sudo tee /etc/modules-load.d/ec_sys.conf
 
-Выбор конфига для AN515-55 (может отсутствовать; кандидаты проверяются по порядку):
+Проверка в режиме ЧТЕНИЯ (не пишет в EC, безопасно смотреть обороты):
 
-    curl -LO https://raw.githubusercontent.com/Kaspral1/Acer-Nitro-Perfect-Fan/main/nbfc/Acer%20Nitro%20AN515-54.json
-    sudo mkdir -p /var/lib/nbfc/configs && cp 'Acer Nitro AN515-54.json' /var/lib/nbfc/configs/
-    sudo nbfc config --set 'Acer Nitro AN515-54'
+    sudo systemctl disable nbfc_service 2>/dev/null
+    sudo nbfc start -r
+    nbfc status -a      # RPM должны быть правдоподобны (CPU ~2000, GPU ~2300)
 
-Старт сервиса в РЕЖИМЕ ЧТЕНИЯ и наблюдение за реальными оборотами вентиляторов:
+Установка тихого конфига (репозитория nitro-fan):
 
-    sudo nbfc restart -r
-    nbfc status -a -w 3
-
-Если обороты корректны (RPM близки к реальным), включаем запись:
-
-    sudo nbfc restart
-    nbfc set -s 40    # вентиляторы должны заметно ускориться
-    nbfc set --auto   # вернуть автоматический профиль
-
-Чтобы тихая кривая заменяла стандартную, установи custom конфиг:
-
-    cp '${PWD}/nbfc-quiet-curve.json' /var/lib/nbfc/configs/'Acer Nitro AN515-55 Quiet.json'
+    sudo mkdir -p /var/lib/nbfc/configs
+    sudo cp '$repo_config' '/var/lib/nbfc/configs/Acer Nitro AN515-55 Quiet.json'
     sudo nbfc config --set 'Acer Nitro AN515-55 Quiet'
+    sudo nbfc sensors set -f 1 -s coretemp -a Max
+
+Включение write-режима, проверка writes и автозапуск:
+
     sudo nbfc restart
-    $0 fan-curve
-
-Автозапуск сервиса после перезагрузки:
-
+    nbfc set -s 40; sleep 5; nbfc set --auto
     sudo systemctl enable nbfc_service
+
+Опционально (когда NBFC не активен): демон тихой кривой '$0 fan-curve'.
 EOF
 }
 
@@ -498,6 +526,7 @@ EOF
 }
 
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+VERSION="$(cat "$(dirname "$SCRIPT_PATH")/VERSION" 2>/dev/null || echo 1.0.0)"
 CACHE_DIR="$CACHE_DIR"
 mkdir -p "$CACHE_DIR"
 CPU_TEMP_FILE="$(find_cpu_temp_file || true)"
@@ -514,6 +543,9 @@ case "${1:-}" in
     install-nbfc) print_nbfc_install_steps ;;
     unit)        print_unit ;;
     unit-cpuquiet) print_unit_cpuquiet ;;
+    unit-timer)  print_unit_timer ;;
+    cpu-quiet-assert) shift; cmd_cpu_quiet assert "$@" ;;
+    --version|-V) echo "nitro-fan ${VERSION:-1.0.0}"; exit 0 ;;
     ec-prep)     cmd_ec_pre ;;
     ec-read)     cmd_ec_read ;;
     ec-test)     shift; cmd_ec_test "$@" ;;
@@ -537,7 +569,11 @@ CPU-тишина (работает уже сейчас, нужен root):
 
 Справка/автоматизация:
   cpu-quiet-apply [МГц]  Не-интерактивное применение тихих настроек (для автозагрузки)
+  cpu-quiet-assert    Перезаписать тихие значения, если nitro-cpu-quiet enable (для таймера)
   install-nbfc        Пошаговая инструкция установки NBFC-Linux
+  unit                systemd unit для автозапуска fan-curve
+  unit-timer          Юнит re-assert (service+timer) против дрейфа EPP
+  --version           Версия скрипта
   unit                systemd unit для автозапуска fan-curve
   ec-prep             Загрузить ec_sys (только чтение) — нужен root
   ec-read             Прочитать EC-регистры вентиляторов и сверить раскладку

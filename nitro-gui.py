@@ -33,6 +33,9 @@ QUIET_NAME = "Acer Nitro AN515-55 Quiet"
 NBFC_ETC = "/etc/nbfc/nbfc.json"
 ACTIVE_MARKER = os.path.expanduser("~/.cache/nitro-fan/cpu-quiet.active")
 UNIT_NAME = "nitro-cpu-quiet.service"
+AUTOSTART_DIR = os.path.expanduser("~/.config/autostart")
+AUTOSTART_FILE = os.path.join(AUTOSTART_DIR, "nitro-fans.desktop")
+VERSION_FILE = os.path.join(DIR, "VERSION")
 
 THRESHOLDS = [50, 55, 60, 65, 70, 75, 80, 85, 90]
 BASE_CURVE = {"cpu": [0, 20, 25, 32, 40, 55, 72, 90, 100],
@@ -296,11 +299,19 @@ DESKTOP = """[Desktop Entry]
 Type=Application
 Name=Nitro: вентиляторы и мощность
 Comment=Тихий режим, полная мощность, кривые вентиляторов
-Exec=python3 /home/ruslan/nitro-fan/nitro-gui.py
+Exec=python3 /home/ruslan/nitro-fan/nitro-gui.py --minimized
 Icon=nitro-fans
 Categories=System;HardwareSettings;
 Terminal=false
 """
+
+
+def read_version():
+    try:
+        with open(VERSION_FILE) as f:
+            return f.read().strip() or "1.0.0"
+    except OSError:
+        return "1.0.0"
 
 
 def install_launcher():
@@ -345,7 +356,8 @@ class NitroGui(Gtk.Application):
 
     def do_activate(self):
         self.hold()
-        self.open_window()
+        if "--minimized" not in sys.argv:
+            self.open_window()
         threading.Thread(target=self.poll_loop, daemon=True).start()
 
     def poll_loop(self):
@@ -394,6 +406,10 @@ class NitroGui(Gtk.Application):
         head = Gtk.HeaderBar()
         head.set_show_close_button(True)
         head.set_custom_title(switcher)
+        btn_about = Gtk.Button.new_from_icon_name("help-about-symbolic",
+                                                  Gtk.IconSize.BUTTON)
+        btn_about.connect("clicked", self.on_about)
+        head.pack_end(btn_about)
         self.win.set_titlebar(head)
 
         self.stack.add_titled(self.build_status_tab(), "status", "Статус")
@@ -545,7 +561,47 @@ class NitroGui(Gtk.Application):
             xalign=0, wrap=True)
         self.lbl_epptext.get_style_context().add_class("muted")
         box.pack_start(self.lbl_epptext, False, False, 0)
+
+        self.chk_autostart = Gtk.CheckButton(
+            label="Запускать приложение при входе в систему (свёрнутым в трей)")
+        self.chk_autostart.set_active(os.path.exists(AUTOSTART_FILE))
+        self.chk_autostart.connect("toggled", self.on_autostart_toggle)
+        box.pack_start(self.chk_autostart, False, False, 0)
         return box
+
+    def on_autostart_toggle(self, chk):
+        try:
+            if chk.get_active():
+                os.makedirs(AUTOSTART_DIR, exist_ok=True)
+                with open(AUTOSTART_FILE, "w") as f:
+                    f.write(DESKTOP)
+            else:
+                os.remove(AUTOSTART_FILE)
+        except OSError as e:
+            if self.lbl_mode:
+                self.lbl_mode.set_text("Автозапуск приложения: ошибка (%s)" % e)
+            chk.set_active(not chk.get_active())
+            return
+        if self.lbl_mode:
+            self.lbl_mode.set_text("Автозапуск приложения: %s" %
+                                   ("включен" if chk.get_active()
+                                    else "отключен"))
+
+    def on_about(self, w):
+        dlg = Gtk.AboutDialog()
+        if self.win:
+            dlg.set_transient_for(self.win)
+            dlg.set_modal(True)
+        dlg.set_program_name("nitro-fan")
+        dlg.set_version(read_version())
+        dlg.set_comments("Управление вентиляторами и мощностью "
+                         "Acer Nitro AN515-55 под Linux.")
+        dlg.set_license("MIT")
+        dlg.set_website("https://github.com/rsmagulov/nitro-fan")
+        dlg.set_website_label("github.com/rsmagulov/nitro-fan")
+        dlg.set_logo_icon_name(ICON_NAME)
+        dlg.run()
+        dlg.destroy()
 
     def build_fans_tab(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
