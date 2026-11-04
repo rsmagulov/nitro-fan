@@ -174,7 +174,8 @@ def read_unit_enabled():
 def read_nbfc_selected():
     try:
         with open(NBFC_ETC) as f:
-            return json.load(f).get("SelectedConfigName")
+            data = json.load(f)
+        return data.get("SelectedConfigName") or data.get("SelectedConfigId")
     except (OSError, ValueError):
         return None
 
