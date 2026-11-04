@@ -187,7 +187,7 @@ def read_fans():
             def fld(key):
                 m = re.search(r"%s\s*:\s*([\d.]+)" % key, chunk)
                 return float(m.group(1)) if m else None
-            name = chunk.splitlines()[0].strip()
+            name = chunk.splitlines()[0].strip().lstrip(":").strip()
             temp = fld("Temperature")
             cur = fld("Current Fan Speed")
             tgt = fld("Target Fan Speed")
