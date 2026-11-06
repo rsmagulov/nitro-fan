@@ -300,11 +300,14 @@ DESKTOP = """[Desktop Entry]
 Type=Application
 Name=Nitro: вентиляторы и мощность
 Comment=Тихий режим, полная мощность, кривые вентиляторов
-Exec=python3 /home/ruslan/nitro-fan/nitro-gui.py --minimized
+Exec=python3 /home/ruslan/nitro-fan/nitro-gui.py
 Icon=nitro-fans
 Categories=System;HardwareSettings;
 Terminal=false
 """
+
+AUTOSTART_DESKTOP = DESKTOP.replace(
+    "nitro-gui.py\n", "nitro-gui.py --minimized\n")
 
 
 def read_version():
@@ -329,6 +332,9 @@ def install_launcher():
 class NitroGui(Gtk.Application):
     def __init__(self):
         super().__init__(application_id="ru.nitro.fans")
+        self.start_minimized = False
+        self.first_activate = True
+        self.poll_started = False
         self.win = None
         self.ind = None
         self.stack = None
@@ -357,9 +363,12 @@ class NitroGui(Gtk.Application):
 
     def do_activate(self):
         self.hold()
-        if "--minimized" not in sys.argv:
+        if not (self.first_activate and self.start_minimized):
             self.open_window()
-        threading.Thread(target=self.poll_loop, daemon=True).start()
+        self.first_activate = False
+        if not self.poll_started:
+            self.poll_started = True
+            threading.Thread(target=self.poll_loop, daemon=True).start()
 
     def poll_loop(self):
         import time
@@ -575,7 +584,7 @@ class NitroGui(Gtk.Application):
             if chk.get_active():
                 os.makedirs(AUTOSTART_DIR, exist_ok=True)
                 with open(AUTOSTART_FILE, "w") as f:
-                    f.write(DESKTOP)
+                    f.write(AUTOSTART_DESKTOP)
             else:
                 os.remove(AUTOSTART_FILE)
         except OSError as e:
@@ -851,7 +860,9 @@ class NitroGui(Gtk.Application):
 def main():
     install_launcher()
     app = NitroGui()
-    app.run(sys.argv)
+    app.start_minimized = "--minimized" in sys.argv
+    argv = [a for a in sys.argv if a != "--minimized"]
+    app.run(argv)
 
 
 if __name__ == "__main__":
